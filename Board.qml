@@ -269,6 +269,9 @@ Item {
             anchors.centerIn: parent
             width: parent.width - Style.space(14)
             text: pad.assigned ? pad.padData.label : "+"
+            // Never let a pad label be interpreted as rich text — an <img>/
+            // <a> in a label would make this element issue a resource load.
+            textFormat: Text.PlainText
             color: pad.assigned ? root.foreground : Qt.darker(root.foreground, 1.6)
             font.family: root.fontFamily
             font.pixelSize: pad.assigned ? Style.font.bodySmall : Style.font.title

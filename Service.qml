@@ -12,6 +12,16 @@ Item {
   property var shell: null
   property var manifest: null
 
+  // Best-effort: if this service is torn down (shell quit, plugin reload, or
+  // `omarchy plugin remove`) while stream mode is up, take the virtual-mic
+  // graph down with it rather than leaving orphaned PipeWire modules. Detached
+  // so it outlives us. (The modules are runtime-only and also clear on the
+  // next PipeWire restart, so this is a tidy-up, not the only safety net.)
+  Component.onDestruction: {
+    if (streamModeOn)
+      Quickshell.execDetached(["bash", streamScript, "off"])
+  }
+
   readonly property int padCount: 16
 
   readonly property string stateHome: Quickshell.env("XDG_STATE_HOME")
@@ -31,6 +41,16 @@ Item {
 
   function defaultPad(i) {
     return { path: "", label: "Pad " + (i + 1) }
+  }
+
+  // Any label that ends up on screen (pad names, device descriptions) goes
+  // through here first: strip characters that a Text element could treat as
+  // markup or that break layout, collapse whitespace, and clamp the length.
+  // Belt-and-braces with textFormat: PlainText on the Text elements.
+  function sanitizeLabel(s) {
+    var t = String(s === undefined || s === null ? "" : s)
+    t = t.replace(/[\x00-\x1f\x7f]/g, " ").replace(/[<>]/g, "").replace(/\s+/g, " ").trim()
+    return t.length > maxLabelChars ? t.slice(0, maxLabelChars) : t
   }
   function defaultPads() {
     var out = []
@@ -74,6 +94,12 @@ Item {
   // or symlinked file can never be pulled whole into the shell, and anything
   // hitting the cap is treated as corrupt rather than silently truncated.
   readonly property int maxStateBytes: 65536
+  // Cap on the `pactl list sources` JSON we'll pull in — plenty for a real
+  // device list, small enough that a pathological graph can't balloon memory.
+  readonly property int maxSourcesBytes: 262144
+  // A pad label / device description longer than this, or one carrying markup
+  // or control characters, is clamped before it ever reaches a Text element.
+  readonly property int maxLabelChars: 96
 
   function setPlaying(i, value) {
     var next = playing.slice()
@@ -143,7 +169,7 @@ Item {
       var base = path.split("/").pop().replace(/\.[^./]+$/, "")
       if (base) label = base
     }
-    next[i] = { path: path, label: label }
+    next[i] = { path: path, label: sanitizeLabel(label) || defaultPad(i).label }
     pads = next
     flushPads()
   }
@@ -152,7 +178,7 @@ Item {
     if (i < 0 || i >= padCount) return
     var next = pads.slice()
     var current = padAt(i)
-    next[i] = { path: current.path, label: label || defaultPad(i).label }
+    next[i] = { path: current.path, label: sanitizeLabel(label) || defaultPad(i).label }
     pads = next
     flushPads()
   }
@@ -206,16 +232,18 @@ Item {
   }
 
   function parseInputSources(txt) {
+    if (!txt || txt.length >= maxSourcesBytes) return  // truncated/oversized: keep the current list
     try {
       var arr = JSON.parse(txt)
+      if (!Array.isArray(arr)) return
       var out = []
-      for (var i = 0; i < arr.length; i++) {
+      for (var i = 0; i < arr.length && out.length < 64; i++) {
         var s = arr[i]
         var cls = (s.properties && s.properties["media.class"]) || ""
         var mon = s.monitor_source
         var isMonitor = mon !== undefined && mon !== null && mon !== "" && mon !== "n/a"
         if (cls === "Audio/Source" && !isMonitor && String(s.name).indexOf("omarchy_") !== 0)
-          out.push({ value: String(s.name), label: String(s.description || s.name) })
+          out.push({ value: String(s.name), label: sanitizeLabel(s.description || s.name) })
       }
       inputSources = out
     } catch (error) {
@@ -281,9 +309,14 @@ Item {
   }
 
   // Enumerates real input devices (pactl -f json). Feeds the mic picker.
+  // `timeout` guards against a wedged pactl; `head -c` caps the JSON we'll
+  // ever pull into the shell (a truncated blob just fails JSON.parse and the
+  // old list is kept).
   Process {
     id: sourcesProc
-    command: ["pactl", "-f", "json", "list", "sources"]
+    command: ["bash", "-c",
+      'exec timeout 5 pactl -f json list sources | head -c "$1"',
+      "dropdeck", String(root.maxSourcesBytes)]
     stdout: StdioCollector {
       id: sourcesOut
       waitForEnd: true
@@ -339,7 +372,13 @@ Item {
 
   Process {
     id: padsReader
-    command: ["head", "-c", String(root.maxStateBytes), root.padsPath]
+    // Refuse to read anything that isn't a plain regular file: a symlink could
+    // redirect the read, and a FIFO in its place would block the reader
+    // forever. `timeout` is a backstop for a wedged filesystem. Output is
+    // still byte-capped (see boundedText).
+    command: ["bash", "-c",
+      'p=$1; n=$2; [ -f "$p" ] && [ ! -L "$p" ] || exit 0; exec timeout 5 head -c "$n" -- "$p"',
+      "dropdeck", root.padsPath, String(root.maxStateBytes)]
     running: true
     stdout: StdioCollector { id: padsOut }
     onExited: function(exitCode) {
@@ -371,7 +410,7 @@ Item {
         for (var i = 0; i < padCount; i++) {
           var p = parsed.pads[i]
           loaded.push(p && typeof p.path === "string"
-            ? { path: p.path, label: typeof p.label === "string" && p.label ? p.label : defaultPad(i).label }
+            ? { path: p.path, label: (typeof p.label === "string" && sanitizeLabel(p.label)) || defaultPad(i).label }
             : defaultPad(i))
         }
         pads = loaded

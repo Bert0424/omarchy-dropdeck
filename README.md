@@ -41,6 +41,12 @@ omarchy plugin update bert.dropdeck   # fast-forward pull, shows a diff first
 omarchy plugin remove bert.dropdeck
 ```
 
+**Turn Stream mode off before you remove the plugin.** `omarchy plugin
+remove` just deletes files — it can't run teardown — so removing while Stream
+mode is live would strand the virtual-mic PipeWire modules until you restart
+PipeWire or log out. The plugin tears them down on shell exit / reload as a
+safety net, but toggling off first is the clean path.
+
 > Like every Omarchy plugin, this runs as unsandboxed code inside
 > `omarchy-shell`. Only add repos whose code you're willing to run.
 

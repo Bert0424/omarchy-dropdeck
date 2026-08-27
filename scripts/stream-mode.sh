@@ -31,18 +31,40 @@
 #
 # Pad playback targets the dropdeck_pads sink only while this is "on" (see
 # Service.qml); otherwise pads just play to the default sink.
+#
+# Teardown does not trust any state file: `off` enumerates PipeWire's own
+# module list and unloads only modules of the three types we load whose args
+# reference dropdeck_pads / dropdeck_bus / dropdeck_mic. So a tampered,
+# symlinked, or missing state file can neither redirect teardown at unrelated
+# modules nor leave a half-built graph behind. STATE_FILE (0600) is kept only
+# as a human-readable breadcrumb of the ids we created.
 set -euo pipefail
+umask 077
 
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
 STATE_FILE="$STATE_DIR/dropdeck-streammode-modules"
 PADS_SINK="dropdeck_pads"
 STREAM_BUS_SINK="dropdeck_bus"
 STREAM_MIC_SOURCE="dropdeck_mic"
+# Every module we load names one of these in its args; teardown keys off that,
+# not off a trust-me id list.
+OURS_RE="(^|[^A-Za-z0-9_])(${PADS_SINK}|${STREAM_BUS_SINK}|${STREAM_MIC_SOURCE})([^A-Za-z0-9_]|$)"
 
 mkdir -p "$STATE_DIR"
 
+# pactl load-module <args...>; record the id (0600 file) as a breadcrumb only —
+# teardown does not depend on it being intact.
+load_module() {
+  local id
+  id="$(pactl load-module "$@")"
+  [[ "$id" =~ ^[0-9]+$ ]] || { echo "load-module gave no id: $*" >&2; return 1; }
+  printf '%s\n' "$id" >> "$STATE_FILE"
+}
+
+# Truth is PipeWire, not the state file: stream mode is "on" iff our pad sink
+# is actually loaded.
 status() {
-  if [[ -f "$STATE_FILE" ]] && pactl list short sinks | grep -q "\\b${PADS_SINK}\\b"; then
+  if pactl list short sinks | grep -q "\\b${PADS_SINK}\\b"; then
     echo "on"
   else
     echo "off"
@@ -54,8 +76,12 @@ on() {
     echo "on"
     exit 0
   fi
-  # Leftover modules from a previous session that died uncleanly.
+  # Clear anything left from a session that died uncleanly, then start a fresh
+  # (0600, truncated) state file.
   off_quiet
+  : > "$STATE_FILE"
+  # Any failure from here on tears down whatever we managed to build.
+  trap 'off_quiet; trap - ERR; exit 1' ERR
 
   # $1 (optional): pin this PipeWire source as the mic instead of following the
   # system default. The plugin passes its saved choice here.
@@ -74,56 +100,63 @@ on() {
   esac
 
   # node.pause-on-idle=false + session.suspend-timeout-seconds=0 keep the
-  # null sinks alive when nothing is flowing. Without this the soundboard
-  # sink suspends a few seconds after the last pad, and the next
+  # null sinks alive when nothing is flowing. Without this the pad sink
+  # suspends a few seconds after the last pad, and the next
   # `pw-play --target dropdeck_pads` blocks forever waiting for a
   # suspended sink to wake instead of playing — pads go silent mid-stream.
   local nullprops="node.pause-on-idle=false session.suspend-timeout-seconds=0"
-  local ids=()
 
-  ids+=("$(pactl load-module module-null-sink \
+  load_module module-null-sink \
     sink_name="$PADS_SINK" \
-    sink_properties="device.description=Dropdeck-Pads $nullprops")")
+    sink_properties="device.description=Dropdeck-Pads $nullprops"
 
-  ids+=("$(pactl load-module module-null-sink \
+  load_module module-null-sink \
     sink_name="$STREAM_BUS_SINK" \
-    sink_properties="device.description=Dropdeck-Bus $nullprops")")
+    sink_properties="device.description=Dropdeck-Bus $nullprops"
 
   # Publish the mixed bus as a real microphone the mic picker will show.
-  ids+=("$(pactl load-module module-remap-source \
+  load_module module-remap-source \
     master="$STREAM_BUS_SINK".monitor \
     source_name="$STREAM_MIC_SOURCE" \
-    source_properties="device.description=Dropdeck-Mic device.class=sound")")
+    source_properties="device.description=Dropdeck-Mic device.class=sound"
 
   # latency_msec=1 is below what module-loopback can actually service and
   # crackles under load; ~20ms is inaudible for a soundboard and stable.
   if [[ -n "$mic_source" ]]; then
-    ids+=("$(pactl load-module module-loopback source="$mic_source" sink="$STREAM_BUS_SINK" latency_msec=20)")
+    load_module module-loopback source="$mic_source" sink="$STREAM_BUS_SINK" latency_msec=20
   else
-    ids+=("$(pactl load-module module-loopback sink="$STREAM_BUS_SINK" latency_msec=20)")
+    load_module module-loopback sink="$STREAM_BUS_SINK" latency_msec=20
   fi
 
-  ids+=("$(pactl load-module module-loopback source="$PADS_SINK".monitor sink="$STREAM_BUS_SINK" latency_msec=20)")
+  load_module module-loopback source="$PADS_SINK".monitor sink="$STREAM_BUS_SINK" latency_msec=20
 
   if [[ -n "$sink_out" ]]; then
-    ids+=("$(pactl load-module module-loopback source="$PADS_SINK".monitor sink="$sink_out" latency_msec=20)")
+    load_module module-loopback source="$PADS_SINK".monitor sink="$sink_out" latency_msec=20
   else
-    ids+=("$(pactl load-module module-loopback source="$PADS_SINK".monitor latency_msec=20)")
+    load_module module-loopback source="$PADS_SINK".monitor latency_msec=20
   fi
 
-  printf '%s\n' "${ids[@]}" > "$STATE_FILE"
+  trap - ERR
   echo "on"
 }
 
 off_quiet() {
-  if [[ -f "$STATE_FILE" ]]; then
-    # Unload in reverse load order so the remap-source goes before the bus
-    # sink it depends on.
-    tac "$STATE_FILE" | while read -r id; do
-      [[ -n "$id" ]] && pactl unload-module "$id" >/dev/null 2>&1 || true
-    done
-    rm -f "$STATE_FILE"
-  fi
+  # Ask PipeWire which modules are ours — anything whose argument string names
+  # dropdeck_pads / dropdeck_bus / dropdeck_mic. A tampered or symlinked state
+  # file can't widen this to unrelated modules, and a half-built graph is torn
+  # down just the same. `tac` unloads newest-first so dependents go before the
+  # sinks they read.
+  local id name args
+  while IFS=$'\t' read -r id name args; do
+    [[ "$id" =~ ^[0-9]+$ ]] || continue
+    case "$name" in
+      module-null-sink|module-loopback|module-remap-source) ;;
+      *) continue ;;
+    esac
+    [[ "$args" =~ $OURS_RE ]] || continue
+    pactl unload-module "$id" >/dev/null 2>&1 || true
+  done < <(pactl list short modules | tac)
+  rm -f "$STATE_FILE"
 }
 
 off() {
