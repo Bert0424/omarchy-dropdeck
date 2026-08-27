@@ -58,12 +58,13 @@ Full disclosure, since it runs unsandboxed:
   loads/unloads PipeWire modules), and `omarchy-notification-send` (errors).
   All are invoked as argument vectors, never through a shell.
 - **Stream mode** loads `module-null-sink` ×2, `module-loopback` ×3 and one
-  `module-remap-source`, and tears every one of them down again when you
-  toggle Stream mode off (module ids are tracked in a state file for exact
-  cleanup). Nothing is left behind.
+  `module-remap-source`. `stream-mode.sh` keeps no state on disk — teardown
+  reads PipeWire's own module list and unloads only those three module types
+  whose args name `dropdeck_pads` / `dropdeck_bus` / `dropdeck_mic`, so a
+  partial build or crash can't leave a half-graph and it can't touch anything
+  that isn't ours.
 - **Writes** exactly one file: `~/.local/state/omarchy/dropdeck-pads.json`
-  (pad assignments + your mic choice). Stream mode also writes a scratch file
-  of module ids in the same directory, removed on toggle-off.
+  (pad assignments + your mic choice), via an atomic replace.
 - **No network access.** No telemetry. Never asks for elevated privileges or
   your password. Nothing written outside `~/.local/state/omarchy/`. Your audio
   files are only ever read, by `pw-play`.

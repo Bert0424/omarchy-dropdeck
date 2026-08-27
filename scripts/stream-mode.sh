@@ -32,37 +32,28 @@
 # Pad playback targets the dropdeck_pads sink only while this is "on" (see
 # Service.qml); otherwise pads just play to the default sink.
 #
-# Teardown does not trust any state file: `off` enumerates PipeWire's own
-# module list and unloads only modules of the three types we load whose args
-# reference dropdeck_pads / dropdeck_bus / dropdeck_mic. So a tampered,
-# symlinked, or missing state file can neither redirect teardown at unrelated
-# modules nor leave a half-built graph behind. STATE_FILE (0600) is kept only
-# as a human-readable breadcrumb of the ids we created.
+# This script keeps NO state on disk. Every question is answered from
+# PipeWire's own live module list: `status` checks whether our pad sink
+# exists, and `off` unloads only modules of the three types we load whose
+# argument string references dropdeck_pads / dropdeck_bus / dropdeck_mic — so
+# a partial build, a crash, or another process can't leave a half-graph or
+# trick teardown into touching unrelated modules.
 set -euo pipefail
-umask 077
 
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy"
-STATE_FILE="$STATE_DIR/dropdeck-streammode-modules"
 PADS_SINK="dropdeck_pads"
 STREAM_BUS_SINK="dropdeck_bus"
 STREAM_MIC_SOURCE="dropdeck_mic"
-# Every module we load names one of these in its args; teardown keys off that,
-# not off a trust-me id list.
+# Every module we load names one of these in its args; teardown keys off that.
 OURS_RE="(^|[^A-Za-z0-9_])(${PADS_SINK}|${STREAM_BUS_SINK}|${STREAM_MIC_SOURCE})([^A-Za-z0-9_]|$)"
 
-mkdir -p "$STATE_DIR"
-
-# pactl load-module <args...>; record the id (0600 file) as a breadcrumb only —
-# teardown does not depend on it being intact.
+# pactl load-module <args...> — fail loudly if it doesn't return a numeric id
+# so on()'s ERR trap tears down a partial build.
 load_module() {
   local id
   id="$(pactl load-module "$@")"
   [[ "$id" =~ ^[0-9]+$ ]] || { echo "load-module gave no id: $*" >&2; return 1; }
-  printf '%s\n' "$id" >> "$STATE_FILE"
 }
 
-# Truth is PipeWire, not the state file: stream mode is "on" iff our pad sink
-# is actually loaded.
 status() {
   if pactl list short sinks | grep -q "\\b${PADS_SINK}\\b"; then
     echo "on"
@@ -76,11 +67,9 @@ on() {
     echo "on"
     exit 0
   fi
-  # Clear anything left from a session that died uncleanly, then start a fresh
-  # (0600, truncated) state file.
+  # Clear anything a prior session left behind, then build. Any failure from
+  # here tears down whatever we managed to create.
   off_quiet
-  : > "$STATE_FILE"
-  # Any failure from here on tears down whatever we managed to build.
   trap 'off_quiet; trap - ERR; exit 1' ERR
 
   # $1 (optional): pin this PipeWire source as the mic instead of following the
@@ -141,11 +130,10 @@ on() {
 }
 
 off_quiet() {
-  # Ask PipeWire which modules are ours — anything whose argument string names
-  # dropdeck_pads / dropdeck_bus / dropdeck_mic. A tampered or symlinked state
-  # file can't widen this to unrelated modules, and a half-built graph is torn
-  # down just the same. `tac` unloads newest-first so dependents go before the
-  # sinks they read.
+  # Unload every module whose type is one we load and whose args reference one
+  # of our uniquely-named devices. Derived entirely from PipeWire, so it can
+  # only ever touch our own graph. `tac` = newest first, so dependents unload
+  # before the sinks they read.
   local id name args
   while IFS=$'\t' read -r id name args; do
     [[ "$id" =~ ^[0-9]+$ ]] || continue
@@ -156,7 +144,6 @@ off_quiet() {
     [[ "$args" =~ $OURS_RE ]] || continue
     pactl unload-module "$id" >/dev/null 2>&1 || true
   done < <(pactl list short modules | tac)
-  rm -f "$STATE_FILE"
 }
 
 off() {
