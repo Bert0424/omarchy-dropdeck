@@ -58,8 +58,9 @@ Full disclosure, since it runs unsandboxed:
 - **Writes** exactly one file: `~/.local/state/omarchy/dropdeck-pads.json`
   (pad assignments + your mic choice). Stream mode also writes a scratch file
   of module ids in the same directory, removed on toggle-off.
-- **No network access.** No telemetry. No `sudo`. Nothing written outside
-  `~/.local/state/omarchy/`. Your audio files are only ever read, by `pw-play`.
+- **No network access.** No telemetry. Never asks for elevated privileges or
+  your password. Nothing written outside `~/.local/state/omarchy/`. Your audio
+  files are only ever read, by `pw-play`.
 
 ## Assigning sounds
 
