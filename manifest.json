@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "bert.dropdeck",
+  "name": "Dropdeck",
+  "version": "1.0.0",
+  "author": "bert",
+  "description": "16-pad soundboard for live streams and podcasts, with a virtual mic that mixes your pads into your voice for Restream or OBS",
+  "kinds": ["service", "bar-widget", "panel"],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml",
+    "panel": "Tile.qml"
+  },
+  "barWidget": {
+    "displayName": "Dropdeck",
+    "description": "16-pad soundboard for live streams, click to open the grid",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
